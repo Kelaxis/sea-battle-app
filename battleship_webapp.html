@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Морской Бой</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            font-family: 'Arial', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .container {
+            max-width: 100%;
+            margin: 0 auto;
+        }
+        
+        .status-bar {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .boards-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        
+        .board-section {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+        }
+        
+        .board-title {
+            text-align: center;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        
+        .battle-grid {
+            display: grid;
+            grid-template-columns: repeat(10, 1fr);
+            gap: 2px;
+            margin: 0 auto;
+            max-width: 300px;
+        }
+        
+        .cell {
+            width: 25px;
+            height: 25px;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+        
+        .cell:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        .cell.water { background: #1E88E5; }
+        .cell.ship { background: #78909C; }
+        .cell.hit { background: #FF5252; }
+        .cell.miss { background: #29B6F6; }
+        
+        .controls {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 14px;
+        }
+        
+        button:disabled {
+            background: #CCC;
+            cursor: not-allowed;
+        }
+        
+        .ship-placer {
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+        }
+        
+        .ship-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .ship-item {
+            padding: 5px 10px;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        
+        .ship-item.selected {
+            background: #4CAF50;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="status-bar" id="statusBar">
+            <div id="gameStatus">Загрузка...</div>
+            <div id="turnInfo"></div>
+        </div>
+        
+        <div class="boards-container">
+            <div class="board-section">
+                <div class="board-title">Ваша доска</div>
+                <div class="battle-grid" id="myBoard"></div>
+            </div>
+            
+            <div class="board-section">
+                <div class="board-title">Доска противника</div>
+                <div class="battle-grid" id="opponentBoard"></div>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="readyBtn" style="display: none;">Готово</button>
+            <button id="surrenderBtn">Сдаться</button>
+        </div>
+        
+        <div class="ship-placer" id="shipPlacer" style="display: none;">
+            <h3>Расставьте корабли</h3>
+            <div class="ship-list">
+                <div class="ship-item" data-size="4">4-палубный (1)</div>
+                <div class="ship-item" data-size="3">3-палубный (2)</div>
+                <div class="ship-item" data-size="2">2-палубный (3)</div>
+                <div class="ship-item" data-size="1">1-палубный (4)</div>
+            </div>
+            <button id="rotateBtn">Повернуть: Горизонтально</button>
+            <button id="autoPlaceBtn">Расставить автоматически</button>
+        </div>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+        let gameState = null;
+        let selectedShip = null;
+        let orientation = 'horizontal';
+        
+        tg.expand();
+        tg.enableClosingConfirmation();
+        
+        // Инициализация игры
+        async function initGame() {
+            const initData = tg.initData;
+            try {
+                const response = await fetch('/battleship_init', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ initData })
+                });
+                
+                gameState = await response.json();
+                updateUI();
+                startPolling();
+            } catch (error) {
+                console.error('Ошибка инициализации:', error);
+            }
+        }
+        
+        // Обновление интерфейса
+        function updateUI() {
+            updateStatus();
+            renderBoard('myBoard', gameState.my_board, false);
+            renderBoard('opponentBoard', gameState.opponent_board, true);
+            
+            // Показываем/скрываем элементы управления
+            document.getElementById('readyBtn').style.display = 
+                gameState.status === 'placing_ships' ? 'block' : 'none';
+            document.getElementById('shipPlacer').style.display = 
+                gameState.status === 'placing_ships' ? 'block' : 'none';
+        }
+        
+        // Обновление статуса игры
+        function updateStatus() {
+            const statusMap = {
+                'pending': 'Ожидание соперника...',
+                'placing_ships': 'Расставьте корабли',
+                'active': gameState.current_turn === tg.initData.user.id ? 
+                         'Ваш ход' : 'Ход противника',
+                'finished': 'Игра завершена'
+            };
+            
+            document.getElementById('gameStatus').textContent = statusMap[gameState.status];
+            document.getElementById('turnInfo').textContent = 
+                gameState.status === 'active' ? `Сделано выстрелов: ${gameState.shots_made}` : '';
+        }
+        
+        // Отрисовка доски
+        function renderBoard(boardId, boardData, isOpponent) {
+            const grid = document.getElementById(boardId);
+            grid.innerHTML = '';
+            
+            // Добавляем буквенные обозначения
+            for (let row = 0; row < 10; row++) {
+                for (let col = 0; col < 10; col++) {
+                    const cell = document.createElement('div');
+                    cell.className = 'cell';
+                    cell.dataset.row = row;
+                    cell.dataset.col = col;
+                    
+                    const cellState = boardData[row][col];
+                    let displayText = '';
+                    let cellClass = 'water';
+                    
+                    switch(cellState) {
+                        case 'S': 
+                            displayText = isOpponent ? '' : 'S';
+                            cellClass = isOpponent ? 'water' : 'ship';
+                            break;
+                        case 'X': 
+                            displayText = 'X';
+                            cellClass = 'hit';
+                            break;
+                        case 'O': 
+                            displayText = '•';
+                            cellClass = 'miss';
+                            break;
+                        default:
+                            displayText = '';
+                            cellClass = 'water';
+                    }
+                    
+                    cell.textContent = displayText;
+                    cell.classList.add(cellClass);
+                    
+                    if (isOpponent && gameState.status === 'active' && 
+                        gameState.current_turn === tg.initData.user.id && 
+                        cellState === '~') {
+                        cell.addEventListener('click', () => makeShot(row, col));
+                    }
+                    
+                    grid.appendChild(cell);
+                }
+            }
+        }
+        
+        // Совершение выстрела
+        async function makeShot(row, col) {
+            try {
+                const response = await fetch('/battleship_shot', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        initData: tg.initData,
+                        game_id: gameState.game_id,
+                        row: row,
+                        col: col
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    gameState = result.game_state;
+                    updateUI();
+                    
+                    if (result.game_over) {
+                        showGameOver(result.winner === tg.initData.user.id);
+                    }
+                } else {
+                    alert(result.message);
+                }
+            } catch (error) {
+                console.error('Ошибка выстрела:', error);
+            }
+        }
+        
+        // Показ результата игры
+        function showGameOver(isWinner) {
+            const message = isWinner ? 
+                '🎉 Вы победили!' : '😢 Вы проиграли!';
+            
+            if (isWinner && gameState.bet > 0) {
+                message += `\nВы выиграли ${gameState.bet * 2} FilmCoin!`;
+            }
+            
+            alert(message);
+            tg.close();
+        }
+        
+        // Опрос состояния игры
+        function startPolling() {
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/battleship_state', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            initData: tg.initData,
+                            game_id: gameState.game_id
+                        })
+                    });
+                    
+                    const newState = await response.json();
+                    if (newState.status !== gameState.status || 
+                        newState.current_turn !== gameState.current_turn) {
+                        gameState = newState;
+                        updateUI();
+                    }
+                } catch (error) {
+                    console.error('Ошибка опроса:', error);
+                }
+            }, 3000);
+        }
+        
+        // Обработчики событий
+        document.getElementById('readyBtn').addEventListener('click', async () => {
+            try {
+                const response = await fetch('/battleship_ready', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        initData: tg.initData,
+                        game_id: gameState.game_id
+                    })
+                });
+                
+                const result = await response.json();
+                if (result.success) {
+                    gameState.status = result.game_state.status;
+                    updateUI();
+                }
+            } catch (error) {
+                console.error('Ошибка готовности:', error);
+            }
+        });
+        
+        document.getElementById('surrenderBtn').addEventListener('click', async () => {
+            if (confirm('Вы уверены, что хотите сдаться?')) {
+                try {
+                    const response = await fetch('/battleship_surrender', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            initData: tg.initData,
+                            game_id: gameState.game_id
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    if (result.success) {
+                        showGameOver(false);
+                    }
+                } catch (error) {
+                    console.error('Ошибка сдачи:', error);
+                }
+            }
+        });
+        
+        // Инициализация при загрузке
+        document.addEventListener('DOMContentLoaded', initGame);
+    </script>
+</body>
+</html>
